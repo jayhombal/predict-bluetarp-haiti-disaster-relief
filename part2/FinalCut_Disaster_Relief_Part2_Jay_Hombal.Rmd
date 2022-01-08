@@ -1,0 +1,1786 @@
+---
+title: "Disaster Relief Project Part2"
+author: "Jay Hombal"
+date: "02/19/2020"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+    theme: paper
+    code_folding: show
+    toc: true
+    toc_float: true
+    collabpsed: false
+    smooth_scrool: false
+    number_section: true
+    toc_depth: 3
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  error = TRUE,             # document will not knit in case of an error
+  echo = TRUE,              # echo code
+  fig.align=TRUE,           # center the graphs on the page
+  out.width = "90%",        # graphs take up to 90% o the available width
+  warning = FALSE,          # suppress warnings
+  message = FALSE,          # suppress message
+  size = "small"            # slightly smaller LaTex output
+)           
+```
+
+
+# Define Problem:
+
+This project is a classification data-mining problem for locating displaced persons living in makeshift shelters following the destruction of the
+earthquake in Haiti in 2010.  
+
+Following that earthquake, rescue workers, mostly from the United States military, needed to get food and water to the displaced persons. But with destroyed communications, impassable roads, and thousands of square miles, actually locating the people who needed help was challenging.  
+
+As part of the rescue effort, a team from the Rochester Institute of Technology flew an aircraft to collect high-resolution geo-referenced imagery. It was known that the people whose homes had been destroyed by the earthquake were creating temporary shelters using blue tarps, and these blue tarps would be good indicators of where the displaced persons were -  if only they could be located in time, out of the thousands of images that would be collected every day. The problem was that there was no way for aid workers to search the thousands of images in time to find the blue tarps and communicate the locations back to the rescue workers on the ground in time. The solution would be provided by data-mining algorithms, which could search the images faster and more thoroughly (and accurately?) then humanly possible.
+
+**The goal was to find an algorithm that could effectively search the images to locate displaced persons and communicate those locations rescue workers so they could help those who needed it in time.**
+
+---
+
+# Prepare Problem
+
+
+## Load libraries
+```{r load-packages, warning=FALSE, message=FALSE}
+# load all required libraries
+library(plyr)
+library(tidyverse)
+library(yardstick)
+library(gridExtra)
+library(caret)
+library(MASS)
+library(pROC)
+library(doParallel)
+library(tune)
+library(stringr)
+library(rlist)
+library(ISLR)
+library(recipes)
+```
+
+## References
+```{r online_and_book_refs}
+# following external resources were referred 
+
+# Books: (in addition to the textbook)
+# ap-modeling : Applied Predictive Modeling by Max Kuhn, Kjell Johnson
+# ml-JasonB:     Machine learning Mastery with R-Get Started by Jason BrownLee
+
+# external references labeled with ref : <label> tag in line with code,
+# links mapped to label in this section
+
+# pr-auc:     https://blog.zenggyu.com/en/post/2019-03-03/how-to-plot-roc-and-precision-recall-curves/
+# multi-core: https://blog.zenggyu.com/en/post/2019-03-03/how-to-plot-roc-and-precision-recall-curves/
+# boxplot:    https://stackoverflow.com/questions/1249548/side-by-side-plots-with-ggplot2
+# transform:  https://r4ds.had.co.nz/transform.html
+# test-harness: https://topepo.github.io/caret/model-training-and-tuning.html#control
+# tuning :    https://www.machinelearningplus.com/machine-learning/caret-package/#6trainingandtuningthemodel
+# tune-grid:  https://machinelearningmastery.com/tune-machine-learning-algorithms-in-r/
+# plot-cfm2: https://stackoverflow.com/questions/37897252/plot-confusion-matrix-in-r-using-ggplot
+# theme-setting: https://bookdown.org/yihui/rmarkdown/slidy-presentation.html#text-size
+# glmnet-se : https://stats.stackexchange.com/questions/299653/caret-glmnet-vs-cv-glmnet
+# penalized-lr : http://www.sthda.com/english/articles/36-classification-methods-essentials/149-penalized-logistic-regression-essentials-in-r-ridge-lasso-and-elastic-net/
+# reg-lr: https://bradleyboehmke.github.io/HOML/regularized-regression.html
+# un-register: https://csantill.github.io/RTuningModelParameters/
+# mote-svm: https://rpubs.com/uky994/593668
+# ref-paper1: https://www.jstor.org/stable/2242400?seq=1
+# tws-dsl1l2: https://towardsdatascience.com/l1-and-l2-regularization-methods-ce25e7fc831c
+# rda : https://daviddalpiaz.github.io/r4sl/regularized-discriminant-analysis.html
+```
+
+
+
+## Enable parallel processing
+```{r multi-cores}
+# code shared by Derek - to improve speed
+# ref: multi-core
+cores <- parallel::detectCores()
+cl <- makePSOCKcluster(cores)
+registerDoParallel(cl)
+grid_control <- 
+  control_grid(verbose = TRUE,pkgs = "doParallel",allow_par = TRUE)
+```
+
+---  
+
+## Functions  
+
+Following are the helper/utility functions mainly abstract repetitive code. These functions are called late in data exploring and model evaluations.
+
+
+### Determine best threshold
+```{r get_best_threshold_from_pr_curve}
+#' Prints precision-recall curve AUC and returns best threshold for pr curve
+#' @param classifier - classifier
+#'
+#' @examples = get_best_threshold_from_pr_curve(classifier = lr_fit)
+#' ref: pr-auc
+get_best_threshold_from_pr_curve <- function(classifier) {
+  
+  
+  # precision-recall-auc
+  prauc <- classifier$pred %>% pr_auc(obs, BlueTarp)
+  
+  #pr_input_df <- as.data.frame(lr_fit$pred)
+  #dplyr::select(pr_input_df, obs, BlueTarp)
+
+  # precision-recall curve
+  prcurve <- classifier$pred %>%
+  pr_curve(obs,BlueTarp, event_level = 'first')
+
+  # threshold, recall and precision
+  mythreshold <- prcurve[['.threshold']]
+  myrecall <- prcurve[['recall']]
+  myprecision <- prcurve[['precision']]
+  
+  # ref: ml-JasonB
+  #f1_score <-
+  #  (2  * myrecall * myprecision) / (myrecall + myprecision)
+  #f2_score <- 
+  #  ((1 + 2^2) * myrecall * myprecision) / (2^2 * (myrecall + myprecision))
+  f0.5_score <- 
+    ((1 + 0.5^2) * myrecall * myprecision) / (0.5^2 * (myrecall + myprecision))
+  
+  # index of max f_Score
+  ix <- which.max(f0.5_score)
+  #ix <- which.max(f1_score)
+  
+  # best threshold from pr_curve
+  best_threshold <- mythreshold[ix]
+  print(paste(classifier$method, 'best threshold:', round(best_threshold,4)))
+  return(best_threshold)
+  
+}
+```
+
+---  
+
+### Confusion matrix utility functions {.tabset .tabset-fade}
+
+#### Get confusion matrix
+```{r get_confusion_matrix}
+#' Returns confusion matrix
+#' @param classifier - classifier
+#'
+#' @examples = get_confusion_matrix(classifier = lr_fit, 0.4)
+#' ref: plot_cfm2
+get_confusion_matrix <- function(classifier , thres = 0.5) {
+
+  classifier$pred <- 
+    mutate(classifier$pred, pred_class = if_else(BlueTarp >= thres, 
+                                               "BlueTarp", "NotBlueTarp"))  
+
+  classifier$pred$pred_class <- factor(classifier$pred$pred_class, 
+                                       levels = c('BlueTarp', 'NotBlueTarp'))
+  cfm <- confusionMatrix(data = classifier$pred$pred_class,
+                         reference = classifier$pred$obs, 
+                         mode = 'everything', 
+                         positive = 'BlueTarp')
+  return (cfm) 
+}
+```
+
+
+#### Plot confusion matrix
+```{r plot_confusion_matrix}
+#' Returns ggplot confusion matrix
+#' @param classifier - classifier
+#'
+#' @examples = plot_confusion_matrix(classifier = lr_fit, 0.4)
+# ref: plot_cfm2
+plot_confusion_matrix <- function(classifier , thres = 0.5) {
+
+  cfm <- get_confusion_matrix(classifier, thres)
+  table <- data.frame(cfm$table)
+
+  # reference provided @ref: plot_cfm2, I likes the code with label 'good' 
+  # and 'bad' predictions so kept the code as is.
+  plotTable <- table %>%
+    mutate(goodbad = 
+      ifelse(table$Prediction == table$Reference, "good", "bad")) %>%
+      group_by(Reference) %>%
+      mutate(prop = Freq/sum(Freq))
+
+  cfm_plot <- ggplot(data = plotTable, 
+                mapping = aes(x = Reference, y = Prediction, 
+                              fill = goodbad, alpha = Freq)) +
+              geom_tile() +
+              geom_text(aes(label = Freq), 
+                        vjust = .5, fontface  = "bold", alpha = 1) +
+              scale_fill_manual(values = c(good = "green", bad = "red")) +
+              labs(title = paste("Confusion Matrix for",
+                                 toupper(classifier$method)),
+                   subtitle = paste("Threshold:", round(thres,4))) +
+              theme_bw() +
+              xlim(rev(levels(table$Reference)))
+
+    
+    return (cfm_plot)
+
+}
+```
+
+
+#### Get holdout confusion matrix
+```{r get_holdout_confusion_matrix}
+#' Returns confusion matrix
+#' @param reference - holdout_data Class variable as the reference 
+#' @param holdout_data_prob - probabilities from the predict function 
+#'                            for positive class
+#' @param threshold - threshold (default = 0.5)
+#'
+#' @examples = get_confusion_matrix(classifier = lr_fit, 0.4)
+#' ref: plot_cfm2
+get_holdout_confusion_matrix <- 
+  function(reference, holdout_data_prob, thres = 0.5) {
+
+  
+  holdout_data_pred <- as.factor(
+  ifelse(holdout_data_prob$BlueTarp >=thres,'BlueTarp','NotBlueTarp'))
+
+  cfm <- confusionMatrix(data = holdout_data_pred, reference = reference, 
+                         mode='everything', positive = 'BlueTarp')
+
+  return (cfm)
+}
+```
+
+
+#### Plot holdout confusion matrix
+```{r plot_holdout_confusion_matrix}
+#' Returns ggplot confusion matrix for holdout dataset
+#' @param reference - holdout_data Class variable as the reference 
+#' @param holdout_data_prob - probabilities from the predict function 
+#'                            for positive class
+#' @param threshold - threshold (default = 0.5)
+#' @param method - classifier method name
+#'
+#' @examples = plot_confusion_matrix(classifier = lr_fit, 0.4)
+#' ref: plot_cfm2
+# ref: plot_cfm2
+plot_holdout_confusion_matrix <- 
+  function(reference, holdout_data_prob, thres = 0.5 , method) {
+
+  holdout_data_pred <- as.factor(
+  ifelse(holdout_data_prob$BlueTarp >=thres,'BlueTarp','NotBlueTarp'))
+
+  cfm <- confusionMatrix(reference = reference, 
+                                   data = holdout_data_pred,
+                                   mode='everything',
+                                   positive = 'BlueTarp')
+  
+  table <- data.frame(cfm$table)
+
+  # reference provided @ref: plot_cfm2, I likes the code with label 'good' 
+  # and 'bad' predictions so kept the code as is.
+  plotTable <- table %>%
+    mutate(goodbad = 
+      ifelse(table$Prediction == table$Reference, "good", "bad")) %>%
+      group_by(Reference) %>%
+      mutate(prop = Freq/sum(Freq))
+
+  cfm_plot <- ggplot(data = plotTable, 
+                mapping = aes(x = Reference, y = Prediction, 
+                              fill = goodbad, alpha = Freq)) +
+              geom_tile() +
+              geom_text(aes(label = Freq), 
+                        vjust = .5, fontface  = "bold", alpha = 1) +
+              scale_fill_manual(values = c(good = "green", bad = "red")) +
+              labs(title = paste("Confusion Matrix for",toupper(method)),
+                   subtitle = paste("Threshold:", round(thres,4))) +
+              theme_bw() +
+              xlim(rev(levels(table$Reference)))
+
+    return (cfm_plot)
+
+}
+```
+
+
+#### Out_of_sample confusion matrix
+```{r oos_CM}
+#' Returns out of sample k-fold confusion matrix
+#'
+#' @param classifer - classifier 
+#'
+#' @examples get_CM(knn_fit)
+get_CM <- function (classifier, threshold = 0.5) {
+  
+  CM <- classifier$pred %>%
+    dplyr::mutate(pred2 = 
+                  ifelse(BlueTarp > threshold, "BlueTarp", "NotBlueTarp")) %>%
+    dplyr::mutate(pred2 = 
+                    factor(pred2, levels = c("BlueTarp", "NotBlueTarp"))) %>%
+    dplyr::group_split(Resample) %>%
+    purrr::map(~ caret::confusionMatrix(data = .x$pred2, reference=.x$obs, 
+                                        positive='BlueTarp'))
+  return (CM)
+}
+
+```
+
+---  
+
+### PR_curve & other helper functions{.tabset .tabset-fade}
+
+#### False discovery rate
+```{r}
+#' Calculate FDR
+#'
+#' @param cfmtable - confusion matrix
+#'
+#' @return FDR value
+#'
+#' @examples fdr(caret::confusionmatrix$table)
+fdr <- function(cfmtable) {
+  TN <- cfmtable[1,1]
+  TP <- cfmtable[2,2]
+  FP <- cfmtable[1,2]
+  FN <- cfmtable[2,1]
+  return ( FP / (FP+TP))
+}
+```
+
+
+#### Plot pr curve
+```{r plot_pr_curve}
+#' Plot Precision Recall Curve & Print AUC
+#' @param classifier - classifier
+#'
+#' @examples = plot_pr_curve(classifier = lr_fit)
+#' ref: pr-auc
+plot_pr_curve <- function(classifier) {
+  # print AUC
+  pr_auc <- classifier$pred %>% pr_auc(obs, BlueTarp, 
+                                       event_level='first')
+  
+  # plot PR curve
+  pr_dat <- classifier$pred %>% pr_curve(obs, BlueTarp,   
+                                         event_level='first')
+  prcurve <- pr_dat %>%
+    arrange(.threshold) %>%
+    ggplot() +
+    labs(title = paste(toupper(classifier$method),"PR curve"),
+         subtitle = paste("PR AUC:", round(pr_auc[['.estimate']],4))) +
+    geom_path(mapping = aes(recall, precision)) +
+    theme (plot.background = element_rect(size = 0.5, color = 'azure4'),
+           axis.line = element_line(size = 0.5 , color="grey37"),
+           title = element_text(color = 'dodgerblue4'),
+           line = element_line(size = 0.5 , color="blue"))
+  
+  # return PR curve object
+  return (prcurve)
+}
+```
+
+#### Holdout plot pr curve
+```{r plot_holdout_pr_curve}
+#' Plot Precision Recall Curve & Print AUC for holdout data
+#' @param classifier - classifier
+#' @param method - method name
+#'
+#' @examples = plot_pr_curve(prob = knn_holdout_prob, 'knn')
+#' ref: pr-auc
+holdout_data_plot_pr_curve <- function(prob, method) {
+  p1 <- knn_holdout_prob
+  pr_auc <-  pr_auc(prob, holdout_data$Class, BlueTarp, event_level = 'first')
+  
+  # plot PR curve
+  pr_dat <- pr_curve(prob, holdout_data$Class, BlueTarp, event_level = 'first')
+
+  prcurve <- pr_dat %>%
+    arrange(.threshold) %>%
+    ggplot() +
+    labs(title = paste(toupper(method),"PR curve"),
+      subtitle = paste("PR AUC:", round(pr_auc[['.estimate']],4))) +
+    geom_path(mapping = aes(recall, precision)) +
+    theme (plot.background = element_rect(size = 0.5, color = 'azure4'),
+           axis.line = element_line(size = 0.5 , color="grey37"),
+           title = element_text(color = 'dodgerblue4'),
+           line = element_line(size = 0.5 , color="blue"))
+
+  return(prcurve)
+
+}
+```
+
+
+
+
+#### Class summary
+```{r "function:class_summary_by_precentage" }
+#' Summarize the class distribution
+#'
+#' @param haiti_ds - accepts train_data or holdout_data 
+#'
+#' @examples class_summary_by_percentage(holdout_data)
+
+class_summary_by_precentage <- function(haiti_ds) {
+  percentage <- prop.table(table(haiti_ds$Class)) * 100
+  print(cbind(frequency = table(haiti_ds$Class), percentage))
+  
+  ggplot(data=haiti_ds) +
+  geom_bar(mapping=aes(x=Class, fill=Class))
+
+}
+```
+
+
+#### Box plots
+```{r function:draw_box_plots_byclass, fig.width=8}
+#' Plot box plots for by class for variables Red, Green and Blue
+#'
+#' @param haiti_ds - accepts train_data or holdout_ata
+#'
+#' @examples plot_boxplots_byclass(holdout_data)
+plot_boxplots_byclass <- function(haiti_ds) {
+# ref: boxplot
+  require(gridExtra)
+  holdout_boxplot1 <- ggplot2::ggplot(data=haiti_ds) +
+    geom_boxplot(mapping = aes(x=Class, y=Red, fill=Class))+
+    theme(legend.position = "top" , legend.direction="vertical")
+  
+
+  holdout_boxplot2 <- ggplot2::ggplot(data=haiti_ds) +
+    geom_boxplot(mapping = aes(x=Class, y=Green, fill=Class))+
+    theme(legend.position = "top", legend.direction="vertical")
+  
+
+  holdout_boxplot3 <- ggplot2::ggplot(data=haiti_ds) +
+    geom_boxplot(mapping = aes(x=Class, y=Blue, fill=Class))+
+    theme(legend.position = "top" ,legend.direction="vertical")
+  
+  grid.arrange(holdout_boxplot1, holdout_boxplot2, holdout_boxplot3, ncol=3)
+
+}
+```
+
+
+#### Get metric
+```{r get_metric}
+#' Return a metric value from caret confusion matrix object
+#'
+#' @param caret_CM - caret confusion matrix 
+#' @param metric_name -  confusion matrix metric_name
+#'
+#' @examples get_metric(caret_CM_knn, 'sensitivity')
+get_metric <- function(caret_CM, metric_name) {
+  caret_CM %>% broom::tidy() %>%
+    dplyr::filter(term == metric_name) %>%
+    dplyr::select(estimate) %>% pull()
+}
+
+```
+
+
+#### Get metric func
+```{r}
+#' Return a metric value from caret confusion matrix object for all folds
+#'
+#' @param caret_CM_objects - caret confusion matrix for k folds
+#' @param metric_name -  confusion matrix metric_name
+#' @param func -  stat function (mean ,median, sd etc)
+#'
+#' @examples get_metric_func(caret_CM_knn, 'sensitivity', mean)
+#' @examples get_metric_func(caret_CM_knn, 'sensitivity', sd)
+get_metric_func <- function(caret_CM_objects, metric_name, func) {
+  caret_CM_objects %>% 
+    purrr::map(~ get_metric(.x, metric_name)) %>%
+    unlist() %>% func
+}
+```
+
+
+#### Get uncertainty measures
+```{r get_uncertainity_measures}
+#' Returns a data frame of mean sensitivity and std. dev. of sensititivity and
+#' fold level sensitivity
+#'
+#' @param classifiers - list of classifiers
+#'
+#' @examples get_uncertainty(classifiers)
+
+get_uncertainty_measures <- function (classifiers) {
+  
+  uncertainity_ds = data.frame(Characters=character(),dbl= double(), 
+                               dbl=double(),dbl=double(),dbl=double(),
+                               dbl=double(),dbl=double(),dbl=double(),
+                               dbl=double(),dbl=double(),dbl=double(),
+                               dbl=double(),dbl=double())
+  column_names = c('method','mean-sensitivity' , 'sdev', 'fold1',
+                   'fold2','fold3','fold4','fold5','fold6','fold7','fold8',
+                   'fold9','fold10')
+  names(uncertainity_ds) <- column_names
+  
+  for (classifer in classifiers) {
+    method_name = classifer$method
+    #print(paste("method: " , method_name))
+    # get out-of-fold confusion matrix
+    out_of_foldsCM = get_CM(classifer) 
+    fold_senitivities = vector("integer", 10)
+    i = 1
+    for (cm in out_of_foldsCM) {
+      fold_senitivities[i] <- get_metric(cm, 'sensitivity')
+      i = i + 1 
+    }
+    #print(fold_senitivities)
+    mean_sensitivity <- get_metric_func(out_of_foldsCM, 'sensitivity', mean)
+    #print(paste("mean_sensitivity: " , mean_sensitivity))
+    
+    sdev <- get_metric_func(out_of_foldsCM, 'sensitivity', sd)
+    #print(paste("sdev: " , sdev))
+    
+    uncertainity_ds <- uncertainity_ds %>% add_row('method' = method_name, 
+                                'mean-sensitivity' = mean_sensitivity,
+                                'sdev' = sdev, 'fold1' = fold_senitivities[1],
+                                'fold2' = fold_senitivities[2],
+                                'fold3' = fold_senitivities[3],
+                                'fold4' = fold_senitivities[4],
+                                'fold5' = fold_senitivities[5],
+                                'fold6' = fold_senitivities[6],
+                                'fold7' = fold_senitivities[7],
+                                'fold8' = fold_senitivities[8],
+                                'fold9' = fold_senitivities[9],
+                                'fold10' = fold_senitivities[10])
+  }
+  return (uncertainity_ds)
+}
+```
+
+#### Clean global env
+```{r}
+#' ref: unregister
+#' Clean or remove objects from env
+#'
+#'
+#' @examples unregister()
+unregister <- function() {
+  env <- foreach:::.foreachGlobals
+  rm(list=ls(name=env), pos=env)
+}
+```
+
+---  
+
+
+### parameter tuning & model fit functions {.tabset .tabset-fade}
+
+#### Get tune grid  
+```{r get_tune_grid, warning=FALSE, message=FALSE}
+#' ref: tune-grid
+#' Returns model specific tune grid
+#'
+#' @param method - learning method name 
+#'                 (must be valid caret train function options)
+#'
+#' @examples get_tune_grid(method = 'glm')
+
+get_tune_grid <- function (method) {
+  
+  
+    # knn
+    if (method == 'knn') {
+      knn_tune_grid <- expand.grid(.k=seq(1,10,by=2))
+      return (knn_tune_grid)
+    }
+    # svc
+    else if (method == 'svm') {
+      svm_tune_grid <- 
+        expand.grid(sigma=c(0.025, 0.05, 0.1), C=seq(1, 5, by=1))
+      return (svc_tune_grid)
+    }
+    # rf
+    else if (method == 'rf') {
+      #mtry = sqrt(ncol(train_data[,2:4]))
+      #rf_tune_grid = expand.grid(.mtry = mtry)
+      rf_tune_grid = expand.grid(.mtry = c(1:5))
+      return (rf_tune_grid)
+    }
+    # lda using penalized discriminant analysis
+    # ref-paper1
+    else if (method == 'pda') {
+      lda_tune_grid = expand.grid(lambda = seq(0.001,1, length=5))
+      return (lda_tune_grid)
+    }
+    # rda using regularized discriminant analysis
+    # ref-paper1
+    else if (method == 'rda') {
+      #gamma  and lambda are as mixing parameters, as they both take values between 0 and 1
+      lda_tune_grid = expand.grid(gamma = seq(0.01, 1, length= 5), lambda = seq(0.001,1, length=5))
+      return (lda_tune_grid)
+    }
+    # lr
+    else if (method == 'lr') {
+      # ref : reg-lr
+      # To regularize lr model we can use the glmnet::glmnet() function. 
+      # The alpha parameter in glmnet is used to perform a ridge (alpha = 0), 
+      # lasso (alpha = 1), or elastic net (0 < alpha < 1) model
+      lr_tune_grid = expand.grid(alpha = 0:1,lambda = seq(0.001,1, length=5))
+      return (lr_tune_grid)
+    }
+    # NULL
+    else {
+      return (NULL)
+    }
+}
+```
+
+**Tuning Models Explained**
+  
+  * KNN: 
+  Choosing odd number of K values to avoid ties in the event of equal number of resposes level for both classes in a binary classification setting. 
+
+  * LDA :
+  After researching There are many different implementation for discriminant analysis type model, I am choosing pda that uses sigma as the tuning parameter
+
+  *  QDA
+  ref : rda
+  No tuning parameters were available for caret package, other I used on RDA(Regularized discriminant analysis), it is an extension of LDA and QDA & combines the covariance of QDA with covariance of LDA ($\sum$) using the tuning parameter $\lambda$.  
+
+  * Logistic Regression:
+  (ref: tws-dsl1l2)
+   *Ridge* and *Lasso* are the two regularization techniques used prevent overfitting in logistic regression.
+  The *Lasso regression* (*L1* regularization) adds absolute value of sum of coefficients as penalty. It tends to reduce the variance related to multicollinearity issues observed in the dataset.
+  
+$${\rm RSS} + \lambda \sum_{j=1}^p |\beta_j|$$  
+  
+  
+  The *Ridge regression* on the other hand adds a squared magnitude of the coefficients as the penalty.
+  
+$${\rm RSS} + \lambda \sum_{j=1}^p \beta_j^2$$  
+  
+  
+  When $\lambda = 0$, for both, its just simple logistic regression. The key difference is that the *Lasso* pushes the coefficients of insignificant variables to zero, works better when the dataset has more features. *Ridge* regularization does shrink the coefficents towards zero but now zero 
+      
+   For the purpose of our project, I will be using the grid search between these two options and use caret to choose the best model.
+
+  * SVM:
+  (ref: more-svm)
+  In SVM, the tuning parameter C is the cost/penalty for making classification errors. And sigma affects the decision boundary, larger values tend to make decision boundary smooth.The caret package can automatically compute SVM for different values of C and to choose the optimal one that maximize the model cross-validation accuracy  
+  
+  * Random Forest
+  RF has 'mtry', the number of variables randomly sampled as candidates at each split and 'ntree'the number of trees to grow as two tuning parameters. however ntree is not available with caret, as caret makes availble only those parameter that have largest effect on the tuning. ntree is not significant so it is omitted. I choose the 
+  
+
+
+#### Fit model
+```{r fit_model}
+#' ref: tune-grid
+#' Returns fitted model
+#'
+#' @param method - learning method name 
+#'                 (must be valid caret train function options)
+#'
+#' @examples fit_model(train_data, method = 'glmnet')
+fit_model <- function (data = data, method="knn", 
+                       metric = "Accuracy" , baseline=FALSE) {
+  # model formula
+  model_formula = formula(Class ~ Blue + Green + Red)
+  tr_control = ifelse(baseline == TRUE, 'method = \'none\'', fitControl)
+  start_time <- proc.time()
+  
+  if (baseline == FALSE) {
+    set.seed(seed)
+    model_fit <- caret::train(model_formula, data=data, 
+                  method=method, preProcess=c("center","scale"),
+                  metric = metric,
+                  # if method none simply fit on entire the dataset
+                  trControl= fitControl,
+                  tuneGrid = get_tune_grid(method))
+  } else {
+    set.seed(seed)
+    model_fit <- caret::train(model_formula, data=data, 
+                  method=method, preProcess=c("center","scale"),
+                  metric = metric,
+                  # if method none simply fit on entire the dataset
+                  trControl= fitControl,
+                  tuneGrid = NULL,
+                  tuneLength = 1)
+
+  }
+
+  return (model_fit)
+}
+```
+
+
+---  
+
+
+# Prepare & Analyze Data
+
+Next, we will load both training and holdout data set.
+
+## Initialize data files & folders
+```{r init_files, cache=TRUE}
+#setwd("C:/Users/mhomb/Documents/UVA-MSDS/Courses/SYS6018/code/sys6018/disaster_relief_project_part2")
+train_data_file  <- "HaitiPixels.csv"
+hold_out_data_folder <- "hold-out-data/"
+holdout_data_files = 
+  list.files(path = hold_out_data_folder, pattern = "*.txt", full.names = TRUE)
+```
+
+
+## Load train data
+```{r train_data, cached=TRUE, dependson = "data_files"}
+seed = 199
+# load the CSV file from the local directory (in part one this was used as the full dataset)
+train_data <- 
+  read.csv(train_data_file, header = TRUE, sep = ",", stringsAsFactors = TRUE)
+```
+
+
+## Load & transform holdout data
+```{r holdout_data, cached=TRUE, dependson = "data_files"}
+# creating an empty dataset
+holdout_data = data.frame(Ints=integer(),Ints=integer(),Ints=integer(),
+                        Characters=character(),stringsAsFactors=FALSE)
+mycolnames = c('Class','Red','Green','Blue')
+names(holdout_data) <- mycolnames
+
+for (file in holdout_data_files) {
+  ho_ds_temp  <-
+    read.table(file, skip = 8,header = F,sep = "",na.strings = "", as.is = TRUE,
+    col.names = c('ID','X','Y','MapX','MapY','Lat','Lon','Red','Green','Blue'))
+    ho_ds_temp <- dplyr::select(ho_ds_temp, Red:Blue)
+  if (str_detect(file, "NO(N|T)"))
+  {
+    ho_ds_temp <- ho_ds_temp %>%
+      mutate(Class = "NotBlueTarp")
+    holdout_data <- rbind(holdout_data, ho_ds_temp)
+  }
+  else {
+    ho_ds_temp <- ho_ds_temp %>%
+      mutate(Class = "BlueTarp")
+	  holdout_data <- rbind(holdout_data,ho_ds_temp)
+  }
+  # removing temp data frame
+  remove(ho_ds_temp)
+}
+
+# reorder columns and factorize
+holdout_data <-  holdout_data %>% 
+  dplyr::select(Class, Red, Green, Blue) %>%
+  mutate(Class = factor(holdout_data$Class, 
+                        levels=c('BlueTarp', 'NotBlueTarp')))
+ 
+```
+**Note**: The validation dataset contained a duplicate file, **orthovnir067_ROI_Blue_Tarps_data.txt** and **orthovnir067_ROI_Blue_Tarps.txt** contained duplicate data for columns **Red** **Green** and **Blue** labeled as **B1**, **B2**, **B3**.   
+The duplicate **orthovnir067_ROI_Blue_Tarps.txt** file was not loaded into the holdout  the dataset.  
+
+---  
+
+In part2 of the project, we will use the entire dataset provided in part1 as the training dataset (train_data). Plus, the new dataset provided with part2 is used as the holdout_dataset(holdout_data). The dataset contains pre-processed image data.     
+
+The training dataset consists of three integer features **Red**, **Green**, **Blue**, and **Class** as the dependent categorical variable. The training dataset has 5 different classes. **Blue Tarp**, **Rooftop**, **Soil**, **Various Non-Tarp** and **Vegetation**. However, since the goal of this study is to predict only **Blue Tarps**, the two classes considered in the study are -  
+  * The **BlueTarp** label - as the positive class  
+  * remaining 4 classes will be represented as **NotBlueTarp** as the negative class.  
+
+The holdout dataset has multiple files with 9 features each. However, for this study, we will only consider the last three columns from each file as **Red**, **Green**, **Blue** columns. Furthermore, the **class** variable is created for each observation based on the file name containing 'NON' or 'NOT' in the file name as **NotBlueTarp** and files without them as the **BlueTarps**.
+
+
+## Training Data 
+
+### Peek at train_data
+```{r}
+str(train_data)
+head(train_data)
+```
+
+
+The training dataset has 63241 records, We can confirm that Class variable was loaded as a factor in the train_data data sets.
+
+### Check missing-data in train_data
+```{r missing_data_in_training_data}
+if (sum(is.na(train_data)) > 0) {
+  train_data <- na.omit(train_data)
+} else {
+  print("no missing values in the training dataset")
+}
+```
+
+
+### Summary train_data 
+```{r "training_data_summary" }
+summary(train_data) 
+```
+The training dataset (train_data) has 3 predictors, **Red**, **Green**, **Blue**, colors, with values ranging from value 0-255 and the variable **Class** as the categorical dependent variable.  
+
+
+### Class distribution train_data 
+```{r "training_data_distribution_by_class" }
+class_summary_by_precentage(train_data)
+```
+
+From the above bar graph & class summary,we can see that the multi-class training dataset is  dataset is highly imbalanced.  
+
+However we are interested in only predicting **BlueTarp** or **NotBlueTarp** so transforming multi-class **Class** variable to binary class variable.  
+
+
+### Transform train_data
+```{r "new dependent categorical variable" }
+# ref: transform
+train_data <- 
+  mutate(train_data, Class = ifelse(train_data$Class == "Blue Tarp",
+                                   "BlueTarp",
+                                   "NotBlueTarp"))  
+# factorize
+train_data <- 
+  mutate(train_data , Class =
+           factor(train_data$Class, levels=c('BlueTarp', 'NotBlueTarp')))
+
+
+# contrasts of Class variable
+contrasts(train_data$Class)
+```
+
+The in-place transformed Class columns is factorized again. 
+
+### Summary transformed train_data 
+```{r "train_data_summary" }
+summary(train_data) 
+```
+
+Now, the training dataset has two only classes **BlueTarp**, **NotBlueTarp** required for our study.  
+
+### Class distribution transformed train_data 
+```{r "transformed_training_data" }
+class_summary_by_precentage(train_data)
+```
+
+
+### Boxplot transformed train_data 
+```{r transformed_train_data_boxplot}
+plot_boxplots_byclass(train_data)
+```
+
+From the above shown transformed dataset class summary and box plot, we can conclude that our data set is highly imbalanced between two classes with only about 3.20% of observations representing the **BlueTarps**. It is a minority positive class we are interested in predicting.
+
+Next, we will explore the holdout out dataset.
+
+## Holdout Data
+
+### Peek at holdout_data 
+```{r}
+str(holdout_data)
+head(holdout_data)
+```
+
+
+### Check missing data in holdout_data
+```{r missing_data_in_holdout_data}
+if (sum(is.na(holdout_data)) > 0) {
+  holdout_data <- na.omit(holdout_data)
+} else {
+  print("no missing values in the holdout dataset")
+}
+```
+The holdout_data the same three features are integer values and does not have any missing data.  
+
+
+### Summary holdout_data 
+```{r "holdout_data_summary" }
+summary(holdout_data) 
+```
+
+
+### Class distribution holdout_data 
+```{r "holdout_data_distribution" }
+class_summary_by_precentage(holdout_data)
+```
+
+
+### Holdout_data boxplot
+```{r holdout_data_boxplot}
+plot_boxplots_byclass(holdout_data)
+```
+
+The training dataset has about 3.20% of the obeservations as **BlueTarp**, we have already confirmed that the training data is highly imbalanced.
+
+We see that holdout dataset is also highly imbalanced. The **BlueTarp** observations are only 0.72% and the **NotBlueTarp** class observations make up 99.28% of the holdout data. 
+
+```{r, desinity plots new Class dependent variable, fig.width = 10, fig.height = 6}
+### train_data density plot
+# density plots for each variable by Class value
+#scales <- list(x=list(relation="free"), y=list(relation="free"))
+#featurePlot(x=train_data[,2:4], y=train_data$Class, plot="density", #scales=scales,
+#            adjust = 1.5, 
+#            pch = "|", 
+#            layout = c(3, 1), 
+#            auto.key = list(columns = 3))
+```
+
+
+---  
+
+# Evaluate Algorithms
+
+In part2 of this project, we will include Random forest and SVM models in addition the KNN, LDQ, QDA and Logistic Regression studied in part1 of the project. 
+
+## Test harness 
+```{r training_control}1
+# ref: test-harness
+fitControl <- trainControl(
+  method = 'cv',            # k-fold cross validation
+  number = 10,              # number of folds
+  savePredictions = 'final',# saves predictions for optimal tuning parameter
+  classProbs = TRUE,      # should class probabilities be computed and returned
+  #summaryFunction = 
+        #twoClassSummary,   # results summary function
+  returnResamp = 'all',     # indicator amount resampled summary metrics -
+  allowParallel = TRUE
+)
+```
+
+
+---  
+
+
+## Baseline Algorithms  
+
+We do not know which algorithm 
+We will first explore each algorithm's baseline performance before applying the **hyper parameter tuning** to each learning method. We make observations, and then we will tune and potentially try variants of each of the learning parameters made available via the R Caret package.
+
+### Fit baseline models
+```{r fit_baseline_algorithms}
+# KNN
+knn_fit_base <- fit_model(train_data,"knn",baseline=TRUE)
+knn_fit_base
+
+# LDA
+lda_fit_base <- fit_model(train_data,"lda", baseline=TRUE)
+lda_fit_base
+
+# QDA
+qda_fit_base <- fit_model(train_data,"qda", baseline=TRUE)
+qda_fit_base
+
+# Logistic Regression
+lr_fit_base <- fit_model(train_data,"glm", baseline=TRUE)
+lr_fit_base
+
+# SVM
+svm_fit_base <- fit_model(train_data,"svmRadial", baseline=TRUE)
+svm_fit_base
+
+# Random Forest
+rf_fit_base <- fit_model(train_data,"rf", baseline=TRUE)
+rf_fit_base
+```
+
+
+We can see the model summaries that the caret package can auto-tune KNN, SVM, and RF models.
+
+We can see from the Accuracy summary and the plots shown above, KNN, SVM, and RF models high accuracy even without any parameter tuning (since caret auto-tunes them).
+
+### Performance measures (thresh = 0.5)
+```{r conf_matrix_baseline_default_thresh}
+knn_cfm_base = get_confusion_matrix(knn_fit_base)
+lda_cfm_base = get_confusion_matrix(lda_fit_base)
+qda_cfm_base = get_confusion_matrix(qda_fit_base)
+lr_cfm_base = get_confusion_matrix(lr_fit_base)
+svm_cfm_base = get_confusion_matrix(svm_fit_base)
+rf_cfm_base = get_confusion_matrix(rf_fit_base)
+
+cfm_df_default_thres_base <- 
+  as.data.frame(list(
+    'knn' = list.append(knn_cfm_base$overall, knn_cfm_base$byClass),
+    'lda' = list.append(lda_cfm_base$overall, lda_cfm_base$byClass),
+    'qda' = list.append(qda_cfm_base$overall, qda_cfm_base$byClass),
+    'lr' =  list.append(lr_cfm_base$overall, lr_cfm_base$byClass),
+    'svm' = list.append(svm_cfm_base$overall, svm_cfm_base$byClass),
+    'rf' =  list.append(rf_cfm_base$overall,rf_cfm_base$byClass)))
+
+knitr::kable(cfm_df_default_thres_base, digits = 4)
+
+```
+
+QDA is faring better than other models, without any tuning. It has a 98.95% very high precision score that minimizes false positives. This is what we desire. We can also note that KNN, SVM, and RF also have precision close to 96%, which is still very good. LDA fares poorly when it comes to precision score.
+
+### Confusion Matrix(thresh =0.5)
+```{r default_threshold_baseline, fig.height=10, fig.width=8}
+cfm_knn_plot_base <- plot_confusion_matrix(knn_fit_base)
+
+cfm_lda_plot_base <- plot_confusion_matrix(lda_fit_base)
+
+cfm_qda_plot_base <- plot_confusion_matrix(qda_fit_base)
+
+cfm_lr_plot_base <- plot_confusion_matrix(lr_fit_base)
+
+cfm_svm_plot_base <- plot_confusion_matrix(svm_fit_base)
+
+cfm_rf_plot_base <- plot_confusion_matrix(rf_fit_base)
+
+
+gridExtra::grid.arrange(cfm_knn_plot_base,cfm_lda_plot_base ,cfm_qda_plot_base, 
+                        cfm_lr_plot_base, cfm_svm_plot_base,
+                        cfm_rf_plot_base, nrow = 3 , newpage = TRUE)
+
+```
+
+
+From the confusion matrix shown above for all baseline fit models, we can see that KNN performs much better on training data.  It has 1949 true positives, with only 90 false positives and 81 false negatives. Even though QDA has the lowest false positives of 18, it has higher false negatives. We need a model that does minimize false positives while balancing false negatives.
+
+** The baseline KNN model performs better on the training data.** 
+
+
+## Tune Hyperparameters
+
+Caret allows tuning for only select models and only certain specific hyper parameters that have biggest effect on accuracy. For the purpose of this study and understanding more about hyper parameter tuning, I will choose to switch -  
+  * The 'glm' logistic regression with 'glmnet' logistic regression model in order to apply *Ridge* and *Lasso* are the two regularization techniques.  
+  * And the 'lda' is replaced to use 'pda' penalized discriminant analysis that uses sigma as the regularization parameter.  
+  * And the 'qda' model no hyper parameters in caret package, so I used on RDA(Regularized discriminant analysis), it is an extension of LDA and QDA & combines the covariance of QDA with covariance of LDA ($\sum$) using the tuning parameter $\lambda$.  
+
+*Hyper parameter details are documented in the functions section of this project for fit_model function.*
+
+Next, we will fit the models with respective hyper parameters to improve the performance with our dataset.
+
+### Fit models with tuned-&-scaled-data
+```{r fit_tuned_scaled_data_models, warning=FALSE, message=FALSE}
+
+# KNN
+knn_fit <- fit_model(train_data,"knn")
+knn_fit
+
+# LDA
+lda_fit <- fit_model(train_data,"pda")
+lda_fit
+
+# QDA
+qda_fit <- fit_model(train_data,"rda")
+qda_fit
+
+# Logistic Regression
+lr_fit <- fit_model(train_data,"glmnet")
+lr_fit
+
+# SVM
+svm_fit <- fit_model(train_data,"svmRadial")
+svm_fit
+
+# Random Forest
+rf_fit <- fit_model(train_data,"rf")
+rf_fit
+```
+
+
+### Model Accuracy Vs. tuning parameter plots 
+```{r model-accuracy-vs-tuning-params, fig.height=10, fig.width=8}
+
+g1 <- ggplot(knn_fit) + 
+      ggtitle(label = 'KNN Neighbors Vs. Accuracy')
+
+g2 <- ggplot(lda_fit)+ 
+      ggtitle(label = 'LDA Shrinkage Penalty Vs. Accuracy')
+
+g3 <- ggplot(qda_fit)+ 
+      ggtitle(label = 'QDA Shrinkage Penalty Vs. Accuracy')
+
+g4 <- ggplot(lr_fit)+ 
+      ggtitle(label = 'LR Regularized Parameter Vs. Accuracy')
+
+g5 <- ggplot(svm_fit)+ 
+      ggtitle(label = 'SVM Cost Vs. Accuracy')
+
+g6 <- ggplot(rf_fit)+ 
+      ggtitle(label = 'RF Random Predictors Vs. Accuracy')
+
+
+gridExtra::grid.arrange(g1,g2,g3,g4,g5,g6, nrow = 3 , newpage = TRUE)
+
+```
+
+
+### Precision-Recall curves
+```{r precision_recall_curves, fig.height=10, fig.width=8}
+# polt p-r curve for all models
+knn_prcurve <- plot_pr_curve(knn_fit)
+lda_prcurve <- plot_pr_curve(lda_fit)
+qda_prcurve <- plot_pr_curve(qda_fit)
+lr_prcurve <- plot_pr_curve(lr_fit)
+svm_prcurve <- plot_pr_curve(svm_fit)
+rf_prcurve <- plot_pr_curve(rf_fit)
+
+library(gridExtra)
+gridExtra::grid.arrange(knn_prcurve,lda_prcurve ,qda_prcurve, lr_prcurve, 
+                        svm_prcurve,rf_prcurve, nrow = 3)
+
+```
+
+The PR-curves are used to draw out relation between true positive rate (precision) and the true positives predicted by the model, as noted in the function plot_pr_curve is used particularly when dataset has highly imbalanced binary classes.  
+
+**From the above shown plot we see that the KNN has the highest AUC for the PR-curve.**
+
+**Note: GLMNET is the implementation for Logistic regression**  
+
+Now, lets examine the sampling uncertainty in k-folds. Our goal in this project is predict BlueTarps which is a minority class in the imbalanced dataset. So model Accuracy is not a good measure for any model.  
+
+Note : PR AUC is calculated and displayed on PR curves
+
+
+### Sampling uncertainty in k-folds
+```{r kfold variation in ROC, warning= FALSE, fig.height=10, fig.width=8}
+plot_kfolds_roc <- function (classifier){
+  myplot<- classifier$resample %>%
+    dplyr::group_split(Resample) %>%
+    purrr::map(rowid_to_column) %>%
+    dplyr::bind_rows() %>%
+    ggplot(aes(rowid, Accuracy)) + geom_point() +
+    geom_smooth(formula='y~x', method='loess', span=.03) +
+    geom_line(classifier$results, mapping=aes(seq_along(Accuracy), Accuracy),
+    size=0.8, color='blue')
+  return (myplot)
+}
+
+g1 <- plot_kfolds_roc(knn_fit) + 
+      ggtitle(label = 'KNN k-folds Vs. Accuracy')
+
+g2 <- plot_kfolds_roc(lda_fit) + 
+      ggtitle(label = 'LDA k-folds Vs. Accuracy')
+
+g3 <- plot_kfolds_roc(qda_fit) + 
+      ggtitle(label = 'QDA K-folds  Vs. Accuracy')
+
+g4 <- plot_kfolds_roc(lr_fit) + 
+      ggtitle(label = 'LR k-folds  Vs. Accuracy')
+
+g5 <- plot_kfolds_roc(svm_fit) + 
+      ggtitle(label = 'SVM k-folds Vs. Accuracy')
+
+g6 <- plot_kfolds_roc(rf_fit) + 
+      ggtitle(label = 'RF k-folds Vs. Accuracy')
+
+gridExtra::grid.arrange(g1, g2, g3, g4, g5, g6, nrow = 3 , newpage = TRUE)
+
+```
+The above shown plot help us appreciate the variability in the model **accuracy** across all 10-folds. 
+
+Next, let us examine and understand the uncertainty in k-folds.
+
+
+```{r sampling_uncertainity}
+classifiers <- list(knn_fit, lda_fit, qda_fit, lr_fit, svm_fit, rf_fit)
+uncertainty_df <- get_uncertainty_measures(classifiers)
+
+knitr::kable(uncertainty_df, digits = 4)
+```
+
+From the above-shown table, we can better appreciate how the k-fold sampling variation is contributing to the change in sensitivity across the fold for each model. for example -
+
+  * For KNN, the mean sensitivity is 0.9585, the highest being .9802 and the lowest is .9604  
+  * For PDA, the mean sensitivity is 0.8017, the highest being 0.8614 and the lowest is 0.7376  
+
+similarly looking at the std. dev for sensitivity for the models, we can examine and understand the uncertainty in prediction accuracy.
+
+The plots also demonstrate this show above helps us understand the variability of accuracy for each of the 10 k-folds.
+
+Note: 'pda' and 'rda' can be tuned in caret applying the shrinkage penalty lambda, rda also uses gamma as tuning parameter.
+
+### Performance measures(params tuned & thresh = 0.5)
+```{r conf-matrix-default-thresh}
+knn_cfm = get_confusion_matrix(knn_fit)
+lda_cfm = get_confusion_matrix(lda_fit)
+qda_cfm = get_confusion_matrix(qda_fit)
+lr_cfm = get_confusion_matrix(lr_fit)
+svm_cfm = get_confusion_matrix(svm_fit)
+rf_cfm = get_confusion_matrix(rf_fit)
+
+cfm_df_default_thres <- 
+  as.data.frame(list('knn' = list.append(knn_cfm$overall, knn_cfm$byClass),
+                     'lda' = list.append(lda_cfm$overall, lda_cfm$byClass),
+                     'qda' = list.append(qda_cfm$overall, qda_cfm$byClass),
+                     'lr' =  list.append(lr_cfm$overall, lr_cfm$byClass),
+                     'svm' = list.append(svm_cfm$overall, svm_cfm$byClass),
+                     'rf' =  list.append(rf_cfm$overall,rf_cfm$byClass)))
+knitr::kable(cfm_df_default_thres, digits = 4)
+
+```
+
+
+Note: In PDF the 10th fold gets truncated due, all columns render in HTML.  
+
+### Confusion Matrix(params tuned & thresh = 0.5)
+```{r default_threshold, fig.height=10, fig.width=8}
+cfm_knn_plot <- plot_confusion_matrix(knn_fit)
+
+cfm_lda_plot <- plot_confusion_matrix(lda_fit)
+
+cfm_qda_plot <- plot_confusion_matrix(qda_fit)
+
+cfm_lr_plot <- plot_confusion_matrix(lr_fit)
+
+cfm_svm_plot <- plot_confusion_matrix(svm_fit)
+
+cfm_rf_plot <- plot_confusion_matrix(rf_fit)
+
+
+gridExtra::grid.arrange(cfm_knn_plot,cfm_lda_plot ,cfm_qda_plot, cfm_lr_plot, 
+                        cfm_svm_plot,cfm_rf_plot, nrow = 3 , newpage = TRUE)
+
+```
+
+
+When we carefully examine each model's metrics, we can see that KNN, SVM, and RF models fare better.
+
+
+Note: From 'rda' a extension of QDA was used and in place of 'lda', the 'pda' model was used for the purpose of tuning the models from caret.
+
+
+
+--- 
+
+Next, we compute the best threshold. Our dataset is highly imbalanced, and since we are interested in predicting the classes **BlueTarp** and **NotBlueTarp**, and **BuleTarp** is minority & positive class. Since we are want to reach as many people as possible with food and water, we want to minimize false-negatives as possible (BlueTarp incorrectly identified as NotBlueTarp).   
+
+
+**Finding Best Threshold Explained:**
+
+We know that the dataset is highly imbalanced. The *BlueTarp* is a minority positive class. The project's goal is to get food and aid to people sheltering in a temporary shelter (*Blue Tarp*). So we want to minimize false-positives first and get the aid to as many people as possible, So we choose to minimize false positives and decided to use the f0.5- measure. 
+
+We know that **precision**  minimizes the false positives, focusing on the model's overall correct positive predictions.
+And the **recall** minimizes the false negatives, focusing on the model's true positive predictions.  
+
+Both metrics have a value between 0 and 1. Choosing *precision* or *recall* to find the best threshold for a model is not easy and can be confusing. Instead, *F-measure (*  that combines both *precision* and  *recall*) can be used, it balances precision and recall. However, when we want to use relative importance to minimizing false positives *or* false negatives, *Fbeat-measure* - the harmonic mean of controlled by $\beta$ is a variation of *F-measure*.  
+
+$$ F_\beta = { (1+ \beta^2) * precision * recall } / { \beta^2 * precision * recall } $$    
+
+The $\beta$  value of 2 is often referred to as the f2-measure, puts more emphasis on recall  (minimizes false negatives) vs. the value of 1 puts equal importance on both precision and recall, and finally, a value of 0.5 puts more emphasis on precision versus recall (minimizes false positives).
+
+
+### Compute Best threshold
+```{r}
+knn_best_thres = get_best_threshold_from_pr_curve(knn_fit)
+lda_best_thres = get_best_threshold_from_pr_curve(lda_fit)
+qda_best_thres = get_best_threshold_from_pr_curve(qda_fit)
+lr_best_thres = get_best_threshold_from_pr_curve(lr_fit)
+svm_best_thres = get_best_threshold_from_pr_curve(svm_fit)
+rf_best_thres = get_best_threshold_from_pr_curve(rf_fit)
+```
+
+
+
+### Performance measures(params tuned & best thres)
+```{r train_databest_threshold}
+
+knn_cfm_thresh = get_confusion_matrix(knn_fit, knn_best_thres)
+knn.fdr <- fdr(knn_cfm_thresh$table)
+
+
+lda_cfm_thresh = get_confusion_matrix(lda_fit, lda_best_thres)
+lda.fdr <- fdr(lda_cfm_thresh$table)
+
+qda_cfm_thresh = get_confusion_matrix(qda_fit, qda_best_thres)
+qda.fdr <- fdr(qda_cfm_thresh$table)
+
+
+lr_cfm_thresh = get_confusion_matrix(lr_fit, lr_best_thres)
+lr.fdr <- fdr(lr_cfm_thresh$table)
+
+svm_cfm_thresh = get_confusion_matrix(svm_fit, svm_best_thres)
+svm.fdr <- fdr(svm_cfm_thresh$table)
+
+rf_cfm_thresh = get_confusion_matrix(rf_fit, rf_best_thres)
+rf.fdr <- fdr(rf_cfm_thresh$table)
+
+best_thres_metrics_df <- 
+  as.data.frame(list('knn' = list.append(knn_cfm_thresh$overall,
+                                    knn_cfm_thresh$byClass , "FDR" = knn.fdr),
+                     'lda' = list.append(lda_cfm_thresh$overall,
+                                    lda_cfm_thresh$byClass, "FDR" = lda.fdr),
+                     'qda' = list.append(qda_cfm_thresh$overall,
+                                    qda_cfm_thresh$byClass,"FDR" = qda.fdr),
+                     'lr' =  list.append(lr_cfm_thresh$overall,
+                                    lr_cfm_thresh$byClass, "FDR" = lr.fdr),
+                     'svm' = list.append(svm_cfm_thresh$overall,
+                                    svm_cfm_thresh$byClass, "FDR" = svm.fdr),
+                     'rf' =  list.append(rf_cfm_thresh$overall,
+                                    rf_cfm_thresh$byClass,  "FDR" = rf.fdr)))
+knitr::kable(best_thres_metrics_df, digits = 4)
+
+```
+
+
+
+### Confusion matrix(params tuned & best thres)
+```{r best_threshold, fig.height=10, fig.width=8}
+
+knn_cfm_plot_thresh <- plot_confusion_matrix(knn_fit, knn_best_thres)
+
+
+lda_cfm_plot_thresh <- plot_confusion_matrix(lda_fit, lda_best_thres)
+
+
+qda_cfm_plot_thresh <- plot_confusion_matrix(qda_fit, qda_best_thres)
+
+
+lr_cfm_plot_thresh <- plot_confusion_matrix(lr_fit, lr_best_thres)
+
+svm_cfm_plot_thresh <- plot_confusion_matrix(svm_fit, svm_best_thres)
+
+rf_cfm_plot_thresh <- plot_confusion_matrix(rf_fit, rf_best_thres)
+
+
+gridExtra::grid.arrange(knn_cfm_plot_thresh,lda_cfm_plot_thresh ,
+                        qda_cfm_plot_thresh, lr_cfm_plot_thresh, 
+                        svm_cfm_plot_thresh, rf_cfm_plot_thresh, nrow = 3)
+
+
+```
+
+
+We computed the optimal best threshold value, as noted above. When we apply this threshold to the predictions made by each of the models, the picture changes ever so slightly.
+
+The best threshold values for each model computed based on ** F0.5** harmonic mean reduced the false positive count for all models.  And it varied from model to model.
+
+---
+
+## Make Predictions
+
+Next, we will do a similar analysis on the holdout data using the hyper parameter tuned fitted models.
+
+### Predict on holdout data
+```{r predicting_holdout_data, fig.height=10, fig.width=8}
+knn_holdout_prob <- predict(knn_fit, holdout_data, type="prob")
+lda_holdout_prob <- predict(lda_fit, holdout_data, type="prob")
+qda_holdout_prob <- predict(qda_fit, holdout_data, type="prob")
+lr_holdout_prob <- predict(lr_fit, holdout_data, type="prob")
+svm_holdout_prob <- predict(svm_fit, holdout_data, type="prob")
+rf_holdout_prob <- predict(rf_fit, holdout_data, type="prob")
+```
+
+
+### Holdout data PR-ROC curve & PR-AUC  
+```{r pr-roc-holdout-data, fig.height=10, fig.width=8}
+# compute and plot pr-roc and pr-auc
+knn_ho_pr_curve <- holdout_data_plot_pr_curve(knn_holdout_prob, 'knn')
+lda_ho_pr_curve <- holdout_data_plot_pr_curve(lda_holdout_prob, 'pda')
+qda_ho_pr_curve <- holdout_data_plot_pr_curve(qda_holdout_prob, 'rda')
+lr_ho_pr_curve <- holdout_data_plot_pr_curve(lr_holdout_prob, 'lr')
+svm_ho_pr_curve <- holdout_data_plot_pr_curve(svm_holdout_prob, 'svm')
+rf_ho_pr_curve <- holdout_data_plot_pr_curve(rf_holdout_prob, 'rf')
+
+
+gridExtra::grid.arrange(
+  knn_ho_pr_curve,lda_ho_pr_curve ,qda_ho_pr_curve, lr_ho_pr_curve, 
+  svm_ho_pr_curve, rf_ho_pr_curve, nrow = 3)
+```
+
+
+### ROC AUC and PR-AUC
+```{r Holdout data ROC-Auc & PR-AUC}
+# compute roc
+holdout_roc <- function (prob) {
+  return (round((prob %>% roc_auc(holdout_data$Class, 
+                        BlueTarp , event_level='first'))[['.estimate']],4))
+}
+
+# compute auc
+holdout_auc <- function (prob) {
+  return (round((prob %>% pr_auc(holdout_data$Class, 
+                        BlueTarp, event_level='first'))[['.estimate']],4))
+}
+
+knn_ho_roc <- holdout_roc(knn_holdout_prob)
+knn_ho_auc <- holdout_auc(knn_holdout_prob)
+
+print(paste ("KNN holout data ROC AUC:", knn_ho_roc, "PR AUC:", knn_ho_auc))
+
+lda_ho_roc <- holdout_roc(lda_holdout_prob)
+lda_ho_auc <- holdout_auc(lda_holdout_prob)
+
+print(paste ("LDA holout data ROC AUC:", lda_ho_roc, "PR AUC:", lda_ho_auc))
+
+
+qda_ho_roc <- holdout_roc(qda_holdout_prob)
+qda_ho_auc <- holdout_auc(qda_holdout_prob)
+
+print(paste ("QDA holout data ROC AUC:", qda_ho_roc, "PR AUC:", qda_ho_auc))
+
+
+lr_ho_roc <-  holdout_roc(lr_holdout_prob)
+lr_ho_auc <-  holdout_auc(lr_holdout_prob)
+
+print(paste ("LR holout data ROC AUC:", lr_ho_roc, "PR AUC:", lr_ho_auc))
+
+svm_ho_roc <- holdout_roc(svm_holdout_prob)
+svm_ho_auc <- holdout_auc(svm_holdout_prob)
+
+print(paste ("SVM holout data ROC AUC:", svm_ho_roc, "PR AUC:", svm_ho_auc))
+
+rf_ho_roc <-  holdout_roc(rf_holdout_prob)
+rf_ho_auc  <- holdout_auc(rf_holdout_prob)
+
+print(paste ("RF holout data ROC AUC:", rf_ho_roc, "PR AUC:", rf_ho_auc))
+```
+
+Note: we will use the PR AUC to record results
+
+---
+
+	
+### Holdout data pred. perf. measures (param tuned & thres=0.5)	
+```{r predicting_holdout_data_metrics_default_thres, fig.height=10, fig.width=8}	
+knn_cfm_ho_dthres <- get_holdout_confusion_matrix(holdout_data$Class, 	
+                                             knn_holdout_prob)	
+lda_cfm_ho_dthres <- get_holdout_confusion_matrix(holdout_data$Class, 	
+                                             lda_holdout_prob)	
+qda_cfm_ho_dthres <- get_holdout_confusion_matrix(holdout_data$Class, 	
+                                             qda_holdout_prob)	
+lr_cfm_ho_dthres <- get_holdout_confusion_matrix(holdout_data$Class, 	
+                                             lr_holdout_prob)	
+svm_cfm_ho_dthres <- get_holdout_confusion_matrix(holdout_data$Class, 	
+                                             svm_holdout_prob)	
+rf_cfm_ho_dthres <- get_holdout_confusion_matrix(holdout_data$Class, 	
+                                             rf_holdout_prob)	
+knn.fdr_ho <- fdr(knn_cfm_ho_dthres$table)	
+lda.fdr_ho <- fdr(lda_cfm_ho_dthres$table)	
+qda.fdr_ho <- fdr(qda_cfm_ho_dthres$table)	
+lr.fdr_ho <- fdr(lr_cfm_ho_dthres$table)	
+svm.fdr_ho <- fdr(svm_cfm_ho_dthres$table)	
+rf.fdr_ho <- fdr(rf_cfm_ho_dthres$table)	
+best_thres_ho_dthres_df <- 	
+  as.data.frame(	
+    list('knn' = list.append(knn_cfm_ho_dthres$overall, 	
+                          knn_cfm_ho_dthres$byClass, "FDR" = knn.fdr_ho),	
+      'lda' = list.append(lda_cfm_ho_dthres$overall, 	
+                          lda_cfm_ho_dthres$byClass, "FDR" = lda.fdr_ho),	
+      'qda' = list.append(qda_cfm_ho_dthres$overall, 	
+                          qda_cfm_ho_dthres$byClass, "FDR" = qda.fdr_ho),	
+      'lr' =  list.append(lr_cfm_ho_dthres$overall, 	
+                          lr_cfm_ho_dthres$byClass, "FDR" = lr.fdr_ho),	
+      'svm' = list.append(svm_cfm_ho_dthres$overall, 	
+                          svm_cfm_ho_dthres$byClass, "FDR" = svm.fdr_ho),	
+      'rf' =  list.append(rf_cfm_ho_dthres$overall,	
+                          rf_cfm_ho_dthres$byClass, "FDR" = rf.fdr_ho)))	
+knitr::kable(best_thres_ho_dthres_df, digits = 4)	
+```	
+    	
+We can easily conclude accuracy is not the best measure for choosing a model for our dataset. All the models with a default threshold of 0.5 have very high accuracy; we have a large and highly imbalanced holdout dataset with only about 0.72% positive classes (BlueTarp). The model accuracy improves because we have 99.28% of observations as 'NotBlueTarp', and all models do a great job of predicting the True negatives.  	
+But we can see the models also have low precision and recall scores compared to the prediction on training data with a default threshold (0.5)  	
+This is an indication of high false positives and false negatives. Interestingly, of all the models, QDA (implemented 'rda' from caret) does seem to have a better and balanced precision-recall score. I suspect the predictions of this model have to fare better than the others.  	
+
+
+### Holdout data confusion matrix(param tuned & thresh=0.5)	
+```{r predicting_holdout_data_cfm_default_thres, fig.height=10, fig.width=8}	
+knn_cfm_plot_ho_thres <- plot_holdout_confusion_matrix(holdout_data$Class, 	
+                                             knn_holdout_prob,	
+                                             method = knn_fit$method)	
+lda_cfm_plot_ho_thres <- plot_holdout_confusion_matrix(holdout_data$Class, 	
+                                             lda_holdout_prob,	
+                                             method = lda_fit$method)	
+qda_cfm_plot_ho_thres <- plot_holdout_confusion_matrix(holdout_data$Class, 	
+                                             qda_holdout_prob,	
+                                             method = qda_fit$method)	
+lr_cfm_plot_ho_thres <- plot_holdout_confusion_matrix(holdout_data$Class, 	
+                                             lr_holdout_prob,	
+                                             method = lr_fit$method)	
+svm_cfm_plot_ho_thres <- plot_holdout_confusion_matrix(holdout_data$Class, 	
+                                             svm_holdout_prob,	
+                                             method = svm_fit$method)	
+rf_cfm_plot_ho_thres <- plot_holdout_confusion_matrix(holdout_data$Class, 	
+                                             rf_holdout_prob,	
+                                             method = rf_fit$method)	
+gridExtra::grid.arrange(	
+  knn_cfm_plot_ho_thres,lda_cfm_plot_ho_thres ,qda_cfm_plot_ho_thres, lr_cfm_plot_ho_thres, 	
+  svm_cfm_plot_ho_thres, rf_cfm_plot_ho_thres, nrow = 3)	
+```	
+  * KNN has low precision and high recall - predicts more false positives and fewer false negatives	
+  * QDA has high precision and lower recall - predicts fewer false positives & high false negatives	
+  * Surprisingly SVM precision-recall scores are low - so it predicts correspondingly more false positives and false negatives..	
+  	
+  Similarly we can analyse the data for all other models.	
+  	
+  A key objective or goal for this study is to minimize false positives as best as we can, so that we can reach and help as many people as possible by maximizing the resources. So I would argue (QDA) is a better first option in this case.
+  
+---
+
+Next, we will analyze the prediction on the holdout data, but this time using the best threshold value determined earlier.
+
+### Holdout data pred. perf. measures (param tuned & thres=best)
+```{r predicting_holdout_data_metrics, fig.height=10, fig.width=8}
+
+knn_cfm_ho <- get_holdout_confusion_matrix(holdout_data$Class, 
+                                             knn_holdout_prob,
+                                             knn_best_thres)
+
+lda_cfm_ho <- get_holdout_confusion_matrix(holdout_data$Class, 
+                                             lda_holdout_prob,
+                                             lda_best_thres)
+
+qda_cfm_ho <- get_holdout_confusion_matrix(holdout_data$Class, 
+                                             qda_holdout_prob,
+                                             qda_best_thres)
+
+
+lr_cfm_ho <- get_holdout_confusion_matrix(holdout_data$Class, 
+                                             lr_holdout_prob,
+                                             lr_best_thres)
+
+
+
+svm_cfm_ho <- get_holdout_confusion_matrix(holdout_data$Class, 
+                                             svm_holdout_prob,
+                                             svm_best_thres)
+
+
+rf_cfm_ho <- get_holdout_confusion_matrix(holdout_data$Class, 
+                                             rf_holdout_prob,
+                                             rf_best_thres)
+
+
+knn.fdr_ho <- fdr(knn_cfm_ho$table)
+lda.fdr_ho <- fdr(lda_cfm_ho$table)
+qda.fdr_ho <- fdr(qda_cfm_ho$table)
+lr.fdr_ho <- fdr(lr_cfm_ho$table)
+svm.fdr_ho <- fdr(svm_cfm_ho$table)
+rf.fdr_ho <- fdr(rf_cfm_ho$table)
+
+
+best_thres_ho_df <- 
+  as.data.frame(
+    list('knn' = list.append(knn_cfm_ho$overall, knn_cfm_ho$byClass, "FDR" = knn.fdr_ho),
+      'lda' = list.append(lda_cfm_ho$overall, lda_cfm_ho$byClass, "FDR" = lda.fdr_ho),
+      'qda' = list.append(qda_cfm_ho$overall, qda_cfm_ho$byClass, "FDR" = qda.fdr_ho),
+      'lr' =  list.append(lr_cfm_ho$overall, lr_cfm_ho$byClass, "FDR" = lr.fdr_ho),
+      'svm' = list.append(svm_cfm_ho$overall, svm_cfm_ho$byClass, "FDR" = svm.fdr_ho),
+      'rf' =  list.append(rf_cfm_ho$overall,rf_cfm_ho$byClass, "FDR" = rf.fdr_ho)))
+
+knitr::kable(best_thres_ho_df, digits = 4)
+```
+
+
+### Holdout data confusion matrix(param tuned & thresh = best)
+```{r predicting_holdout_data_cfm, fig.height=10, fig.width=8}
+knn_cfm_plot_ho <- plot_holdout_confusion_matrix(holdout_data$Class, 
+                                             knn_holdout_prob,
+                                             knn_best_thres,
+                                             knn_fit$method)
+
+
+lda_cfm_plot_ho <- plot_holdout_confusion_matrix(holdout_data$Class, 
+                                             lda_holdout_prob,
+                                             lda_best_thres,
+                                             lda_fit$method)
+
+qda_cfm_plot_ho <- plot_holdout_confusion_matrix(holdout_data$Class, 
+                                             qda_holdout_prob,
+                                             qda_best_thres,
+                                             qda_fit$method)
+
+
+lr_cfm_plot_ho <- plot_holdout_confusion_matrix(holdout_data$Class, 
+                                             lr_holdout_prob,
+                                             lr_best_thres,
+                                             lr_fit$method)
+
+
+svm_cfm_plot_ho <- plot_holdout_confusion_matrix(holdout_data$Class, 
+                                             svm_holdout_prob,
+                                             svm_best_thres,
+                                             svm_fit$method)
+
+rf_cfm_plot_ho <- plot_holdout_confusion_matrix(holdout_data$Class, 
+                                             rf_holdout_prob,
+                                             rf_best_thres,
+                                             rf_fit$method)
+
+
+cfm_df_best_thres <- 
+  as.data.frame(list('knn' = list.append(knn_cfm_ho$overall, knn_cfm_ho$byClass),
+                     'lda' = list.append(lda_cfm_ho$overall, lda_cfm_ho$byClass),
+                     'qda' = list.append(qda_cfm_ho$overall, qda_cfm_ho$byClass),
+                     'lr' =  list.append(lr_cfm_ho$overall, lr_cfm_ho$byClass),
+                     'svm' = list.append(svm_cfm_ho$overall, svm_cfm_ho$byClass),
+                     'rf' =  list.append(rf_cfm_ho$overall,rf_cfm_ho$byClass)))
+round(cfm_df_best_thres, 4)
+
+gridExtra::grid.arrange(knn_cfm_plot_ho,lda_cfm_plot_ho ,qda_cfm_plot_ho, lr_cfm_plot_ho, 
+  svm_cfm_plot_ho, rf_cfm_plot_ho, nrow = 3)
+
+```
+
+
+---
+
+# Cost-Matrix
+
+ref: ml-jasonB
+
+In Cost Sensitive learning, we deliberately use different costs as penalty with each type model errors then calculate the total cost associated with the prediction errors. The goal here is to minimze the cost of prediction errors. This is a wide field in itself, the cost can be calculated on the basis of 
+  - prediction errors
+  - labeling errors (threshold)
+  - compute complexity... etc.,
+
+I am taking a simple approach of associating cost with model prediction error (false positive) as cost incurred and that should be 
+included as part of the overall budget. So we will be interested to see it a model fares better purely from a budget perspective, and asses if the best threshold based predictions are inline or outside of the budget allocated. 
+
+The holdout dataset we are dealing with is highly imbalanced. The *BlueTarp* is a minority and a positive class, and *NOTBlueTarp* is a majority and a negative class.
+
+We assume there is no cost for both *False Negative* and *True Negative* predictions. This is thinking purely from budget perspective, and it is not easy to quantify the cost of not reaching people in case of *False Negative* predictions.
+
+And We assume a budget of 5000000 dollars and the cost of a *False Positive* prediction to be $500 and **True Positive** to be $300. 
+
+Since we have already computed the best threshold for each model and made predictions based on each model, our goal would be to assess which model performs predictions better from a cost perspective. To calculate the total cost from the confusion matrix, we arrive after predicting for each model when computed if, within the assumed budget, we would consider the project to be successful.
+
+  Total Cost = Cost of True Positives * True Positives + Cost of False Positives * False Positives
+
+```{r cost-matix}
+#' Function to calculate the total cost and assess if it is within budget or not
+get_cost_matrix_eval <- function (cfm, method) {
+  #budget = 10000000
+  #cost_matrix <- matrix(c(250, 500,0,0), nrow=2, ncol=2, byrow=TRUE)
+  cost = cfm$table[1,1] * 250 + cfm$table[1,2] * 500
+  if (cost < 5000000) {
+    print (paste(method, cost, "prediction cost is within budget"))
+  } else {
+    print (paste(method, cost, "prediction cost is outside the budget"))
+  }
+}
+knn_cost <- get_cost_matrix_eval(knn_cfm_ho, 'knn')
+lda_cost <- get_cost_matrix_eval(lda_cfm_ho, 'lda')
+qda_cost <- get_cost_matrix_eval(qda_cfm_ho, 'qda')
+lr_cost <- get_cost_matrix_eval(lr_cfm_ho, 'lr')
+svm_cost <- get_cost_matrix_eval(svm_cfm_ho, 'svm')
+rf_cost <- get_cost_matrix_eval(rf_cfm_ho, 'rf')
+
+```
+
+
+Cleanup
+```{r stop_cluster}
+# ref: multi-core
+stopImplicitCluster()
+
+#unregister
+#unregister()
+```
+
+---
+
+# Results
+
+## K-folds out of sampling performance 
+
+![](./part2-training.jpg)
+
+## Hold-fold sample performance 
+
+
+![](./part2-holdout.jpg)
+
+Performance metrics for the model with best threshold varied besides accuracy, the change in precision and recall values resulted in different PR AUC and ROC curves on the holdout dataset, as can seen in the plot shown in earlier sections.
+
+---
+
+# Conclusion
+
+
+Conclusion:
+
+
+1. A discussion of the best performing algorithm(s) in the cross-validation and holdout data
+- which algorithms appear to be reasonable/good choices for use according to cross-validation?
+- which algorithms actually ended up performing well in the holdout data?
+
+In cross-validation, the three models, KNN, SVM, and RF models fare better. All three models have high accuracy and high precision, which is one of this project's goals. 
+Precision minimizes false positives and maximizes the best utilization of resources to help people in need.
+What is interesting is RDA (a variant of QDA) has high precision minimizes false positives but performs poorly on false negatives compared to the top three (KNN, SVM, and RF). The LDA did not perform well with the precision score compared to other models. it has the lowes precision (shown in the above metric table)
+
+When dealing with an imbalanced dataset, it is important to select a model that minimizes false positives (when the minority class is a positive class) and does well in balancing the false negatives.
+With the default threshold=0.5, KNN, SVM, and RF models have high precision and recall scores. They are certainly good candidate models.
+
+**Analyzing the confusion matrix, KNN does seem to do better in minimizing and balancing false positives and false negatives.**  
+
+In the holdout dataset,  **QDA ended up performing better. It has more balanced precision and recall scores**, so accordingly, it shows better & balanced prediction, as shown in the confusion matrix above.
+Other models such as KNN, LR, SVM, and RF predict better on true positives having higher sensitivity scores and suffer from low precision values, resulting in high false. positives 
+
+
+
+2. 2.A discussion or analysis justifying why your findings above are compatible or reconcilable
+- Do the answers to both of the above questions agree? (I.e., are they compatible?)  If not, do you have any reasons why they might not agree? (I.e., can they be reconciled somehow?)
+
+In part1, we concluded that KNN performed better on the holdout data set than other models  (LDA, QDA, and LR). However, that finding does hold good any more than prediction results on the holdout out dataset in part2 of this project., The three reasons why this may be occurring is
+
+In part1, the best threshold was used determined from ROC curves (pROC package can calculate and show the best threshold on the curve itself). This measure is more suitable for a balanced dataset in binary classification. In part 2, we calculated the best threshold PR_curve using F0.5-measure (harmonic mean), which minimizes false positives.
+The holdout dataset in part 2 is even more highly imbalanced compared to the training dataset. Training data has around 3.2% of BlueTarps, where was the holdout dataset has only .72% blue Tarps. The huge dataset and sampling variation affecting the model's precision accuracy in cross folds could be another reason why the best performing model in part 1 did not perform well in part 2.
+
+
+3. The recommendation and rationale regarding which algorithm to use for the detection of blue tarps.
+
+Training dataset:
+  As noted above for the training data in part2, KNN does preform better than other models.
+
+Holdout dataset:
+	Analyzing the confusion matrix and performance metrics for all models, one can make an argument that the GLMNET LR model does better in predicting true positive (BlueTarp), similarly. RF, KNN, and SVM models predict almost equal (KNN) or far greater than true positives. This indicates that the precision score is less than the recall score for these. models.
+As the goal is to minimize false positives,  comparing all models (including LDA ~' pda' implementation'). The QDA model ('rda' implementation) has more balanced false positive and false negative predictions with reasonably good true positive predictions 
+
+
+
+4. A discussion of the relevance of the metrics calculated in the tables to this application context
+
+ref: ml-JasonB
+
+**Accuracy**: Accuracy is the most widely used metric, which is the ratio of the number of correct predictions to the model's total predictions. From the analysis of this project, it is clear now that accuracy is not always the best measure of classification performance. A model can have high accuracy in imbalanced classification by always predicting the majority class correctly even though that happens to be the negative class.
+
+** Threshold**: Threshold is a numeric value between 0 and 1 used for converting the prediction probabilities into class labels.
+The default threshold value is 0.5, and often we try to find the optimum or best threshold value for a model for a specific dataset. The optimum threshold can be found from the ROC curve or the precision-recall curve.  
+       
+**PR CURVE PR AUC**: The Precision-Recall curve and AUC are more useful for imbalanced datasets, primarily focus on the minority classes. The precision-recall curve is calculated by creating the class labels from the probability predictions across a range of thresholds between 0 and 1 and then calculating the precision-recall at each threshold value.
+
+**Sensitivity**:  It is also referred to as the true positive rate. It measures how well the model is predicting true positives.
+		
+	Sensitivity  = TP / (TP + FN)
+
+**Specifitivity**:  also referred to as true negative rate, this measures how well the model is predicting negative classes
+
+	Specificity =  TN / (FP + TN)
+
+In an imbalanced dataset like the one used in this classification, sensitivity important than specificity. The minority positive class prediction is what we are interested in, so we care about sensitivity.
+
+**Precision**:  Precision measures how well the model predicts true positives of all the positive classes assigned during the classification.
+A higher precision score minimizes false positives. This measure we are interested in for this case study as we have a highly imbalanced dataset
+
+	Precision = TP / (TP + FP)
+
+**Recall**:  Recall is the same as sensitivity when it comes to calculations, but the interpretation here would be that it measures how well the model predicts positive classes. Recall minimizes the false negatives.
+
+ 	Recall = TP / ( TP + FN)
+
+**False Discovery Rate (FDR): is the measure of all false positives predicted by the mode of all the positives predicted
+   
+	FDR =   FP / (FP+TP)
+	
+
+5.Understanding and appreciating uncertainty in the accuracy of point estimates.
+    
+As I have shown above through detailed analysis, there is considerable variation in the model performance metrics - sensitivity, the true positive rate across all the out-of-sample folds, for each model, let alone the sampling variation in the entire dataset. So we can not take point estimates as accurate performance measures for a classification problem. We need to analyze thoroughly and understand the potential uncertainty in our dataset.  
+
+
+6. Finding the Optimal Threshold for Imbalanced data sets:
+In our study, we configured the caret train control object to return all class probabilities, and these uses these probabilities to predict the class label as 'BlueTarp or 'NotBlueTarp.' by using a threshold value, and we need to find an optimum threshold value for each model fit for our particular dataset for a classification problem.
+
+The optimum threshold value can be calculated from the ROC curve and the precision-recall curve. The ROC curve tries to find the optimum balance between true positive(sensitivity) and false-positive rates (specificity). So thresholding using ROC curves is more favored for balanced data sets.
+
+The Precision recall curve depends on precision and recall values, so it focuses on the minority positive class in the dataset.
+In this project, we wanted to get high precision and high recall scores so that our model performs better in minimizing the false positives and false negatives, but often it is hard to achieve.
+F-measure is the harmonic mean that summarizes the model's model performance by combining both precision and recall. When we are interested in predicting more true positives, we should be able to sue the F$\beta$ measure and extension of the f- feature. For our analysis, we used F0.5- a measure that puts more weight on precision and less on recall.
+
+In conclusion, even though we did cross-validation, tuned hyper parameters, and labeled classes for each models' prediction probabilities using the corresponding best threshold value, the model that performed better with the training set did not perform well with the holdout dataset.This could due to the fact that complex models tend to overfit the training data and do not yeild the same level of prediction accuracy with new holdout data & the uncertainty in model performance that is because of sampling variation in highly imbalanced dataset.
+
+I look forward to explore further & learn more about detail different model evaluation techniques...
+
+
+
+
+
+
+
+
+
